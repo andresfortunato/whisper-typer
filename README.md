@@ -11,7 +11,7 @@ Voice-to-text typing tool for Linux. Records speech via global hotkey, transcrib
 ## Build
 
 ```bash
-git clone --recursive https://github.com/YOUR_USER/whisper-typer.git
+git clone --recursive https://github.com/andresfortunato/whisper-typer.git
 cd whisper-typer
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
