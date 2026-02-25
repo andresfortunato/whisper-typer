@@ -167,6 +167,13 @@ static bool typer_params_parse(int argc, char ** argv, typer_params & params) {
     return true;
 }
 
+static std::atomic<bool> g_running(true);
+static std::atomic<bool> g_sigusr1(false);
+
+static bool whisper_abort_cb(void * /*user_data*/) {
+    return !g_running;
+}
+
 // Transcribe audio buffer and return concatenated text
 static std::string transcribe(
         struct whisper_context * ctx,
@@ -189,6 +196,9 @@ static std::string transcribe(
     wparams.no_timestamps    = true;
     wparams.suppress_blank   = true;
 
+    wparams.abort_callback           = whisper_abort_cb;
+    wparams.abort_callback_user_data = nullptr;
+
     // Silero VAD integration
     if (!params.vad_model_path.empty()) {
         wparams.vad            = true;
@@ -209,9 +219,6 @@ static std::string transcribe(
 
     return result;
 }
-
-static std::atomic<bool> g_running(true);
-static std::atomic<bool> g_sigusr1(false);
 
 static void signal_handler(int /*sig*/) {
     g_running = false;
@@ -300,6 +307,7 @@ int main(int argc, char ** argv) {
     signal(SIGTERM, signal_handler);
 #ifdef __linux__
     signal(SIGUSR1, sigusr1_handler);
+    signal(SIGTSTP, SIG_IGN);  // Prevent job-control stop (Ctrl+Z) — a stopped process can't respond to SIGTERM
 #endif
 
     // Validate language
