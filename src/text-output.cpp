@@ -99,14 +99,22 @@ int TextOutput::run_cmd(const char * const argv[], int timeout_ms,
     // Parent process
     if (stdin_data) {
         close(stdin_pipe[0]);
-        // Write data to child stdin, ignoring partial writes for simplicity
+        // Set write end to non-blocking for timeout support
+        fcntl(stdin_pipe[1], F_SETFL, O_NONBLOCK);
+        auto write_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         const char * data = stdin_data->c_str();
         size_t remaining = stdin_data->size();
         while (remaining > 0) {
             ssize_t written = write(stdin_pipe[1], data, remaining);
-            if (written <= 0) break;
-            data += written;
-            remaining -= written;
+            if (written > 0) {
+                data += written;
+                remaining -= written;
+            } else if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                if (std::chrono::steady_clock::now() >= write_deadline) break;
+                usleep(1000);
+            } else {
+                break;
+            }
         }
         close(stdin_pipe[1]);
     }
@@ -240,8 +248,10 @@ bool TextOutput::type_clipboard(const std::string & text) {
 
     {
         const char * argv[] = {"xclip", "-selection", "clipboard", nullptr};
-        // Restore saved clipboard (or write empty to clear)
-        run_cmd(argv, CMD_TIMEOUT_MS, &saved_clipboard);
+        int restore_ret = run_cmd(argv, CMD_TIMEOUT_MS, &saved_clipboard);
+        if (restore_ret != 0) {
+            fprintf(stderr, "text-output: warning: clipboard restore failed\n");
+        }
     }
 
     return paste_ret == 0;
