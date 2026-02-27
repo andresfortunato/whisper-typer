@@ -138,6 +138,7 @@ static int name_to_evdev(const std::string & name) {
     if (lower == "capslock")    return KEY_CAPSLOCK;
     if (lower == "print" || lower == "sysrq") return KEY_SYSRQ;
     if (lower == "pause")       return KEY_PAUSE;
+    if (lower == "plus" || lower == "kpplus") return KEY_KPPLUS;
 
     // F-keys: KEY_F1..KEY_F10 are contiguous (59-68), but KEY_F11=87, KEY_F12=88 are NOT
     static_assert(KEY_F1 + 9 == KEY_F10, "F1-F10 evdev keycode layout assumption violated");
