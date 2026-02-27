@@ -18,7 +18,7 @@
 #include <signal.h>
 #include <errno.h>
 
-// Timeout for subprocess calls (xclip, xdotool)
+// Timeout for subprocess calls (xclip, xdotool, wtype, wl-copy)
 static constexpr int CMD_TIMEOUT_MS = 5000;
 
 // Delay after setting clipboard before sending paste keystroke
@@ -26,6 +26,12 @@ static constexpr int CLIPBOARD_SET_DELAY_MS = 50;
 
 // Delay after paste before restoring the original clipboard
 static constexpr int CLIPBOARD_RESTORE_DELAY_MS = 300;
+
+DisplayBackend detect_display_backend() {
+    if (getenv("WAYLAND_DISPLAY")) return DisplayBackend::WAYLAND;
+    if (getenv("DISPLAY"))         return DisplayBackend::X11;
+    return DisplayBackend::UNKNOWN;
+}
 
 TextOutput::TextOutput() {}
 TextOutput::~TextOutput() {}
@@ -38,9 +44,18 @@ void TextOutput::set_type_delay_ms(int delay_ms) {
     m_type_delay_ms = delay_ms;
 }
 
+void TextOutput::set_backend(DisplayBackend backend) {
+    m_backend = backend;
+}
+
 bool TextOutput::type(const std::string & text) {
     if (text.empty()) return true;
 
+    if (m_backend == DisplayBackend::WAYLAND) {
+        return type_wtype(text);
+    }
+
+    // X11 path
     if (m_use_clipboard) {
         return type_clipboard(text);
     } else {
@@ -151,6 +166,21 @@ int TextOutput::run_cmd(const char * const argv[], int timeout_ms,
         }
         usleep(10000); // 10ms poll interval
     }
+}
+
+bool TextOutput::type_wtype(const std::string & text) {
+    std::string delay_str = std::to_string(m_type_delay_ms);
+    const char * argv[] = {
+        "wtype", "--delay", delay_str.c_str(),
+        "--", text.c_str(), nullptr
+    };
+
+    int ret = run_cmd(argv, CMD_TIMEOUT_MS);
+    if (ret != 0) {
+        fprintf(stderr, "text-output: wtype failed (exit %d)\n", ret);
+        return false;
+    }
+    return true;
 }
 
 bool TextOutput::type_xdotool(const std::string & text) {

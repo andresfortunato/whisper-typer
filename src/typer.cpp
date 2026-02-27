@@ -314,13 +314,27 @@ int main(int argc, char ** argv) {
         waitpid(pid, &status, 0);
         return WIFEXITED(status) && WEXITSTATUS(status) == 0;
     };
-    if (!check_dep("xdotool")) {
-        fprintf(stderr, "error: xdotool not found. Install with: sudo apt install xdotool\n");
+    // Detect display backend
+    DisplayBackend display = detect_display_backend();
+    if (display == DisplayBackend::UNKNOWN) {
+        fprintf(stderr, "error: no display server detected (need WAYLAND_DISPLAY or DISPLAY)\n");
         return 1;
     }
-    if (params.use_clipboard && !check_dep("xclip")) {
-        fprintf(stderr, "error: xclip not found. Install with: sudo apt install xclip\n");
-        return 1;
+
+    if (display == DisplayBackend::WAYLAND) {
+        if (!check_dep("wtype")) {
+            fprintf(stderr, "error: wtype not found. Install with: sudo apt install wtype\n");
+            return 1;
+        }
+    } else {
+        if (!check_dep("xdotool")) {
+            fprintf(stderr, "error: xdotool not found. Install with: sudo apt install xdotool\n");
+            return 1;
+        }
+        if (params.use_clipboard && !check_dep("xclip")) {
+            fprintf(stderr, "error: xclip not found. Install with: sudo apt install xclip\n");
+            return 1;
+        }
     }
     bool has_notify = check_dep("notify-send");
 
@@ -343,8 +357,9 @@ int main(int argc, char ** argv) {
         // Write PID to lock file for --stop support
         if (ftruncate(lock_fd, 0) == 0) {
             std::string pid_str = std::to_string(getpid());
-            // NOLINTNEXTLINE - write result intentionally ignored for lock file
-            (void)write(lock_fd, pid_str.c_str(), pid_str.size());
+            if (write(lock_fd, pid_str.c_str(), pid_str.size()) < 0) {
+                // Best-effort PID write for --stop support; not critical
+            }
         }
         // Keep lock_fd open for the lifetime of the process
     }
@@ -441,6 +456,7 @@ int main(int argc, char ** argv) {
 
     // Init text output
     TextOutput output;
+    output.set_backend(display);
     output.set_use_clipboard(params.use_clipboard);
     output.set_type_delay_ms(params.type_delay_ms);
 
@@ -453,6 +469,7 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "  hotkey    = %s%s\n", params.hotkey.c_str(), hotkey_ok ? "" : " (UNAVAILABLE)");
     fprintf(stderr, "  pid       = %d\n", (int)getpid());
     fprintf(stderr, "  mode      = %s\n", params.push_to_talk ? "push-to-talk" : "toggle");
+    fprintf(stderr, "  display   = %s\n", display == DisplayBackend::WAYLAND ? "wayland" : "x11");
     fprintf(stderr, "  clipboard = %s\n", params.use_clipboard ? "yes" : "no");
     if (!params.vad_model_path.empty()) {
         fprintf(stderr, "  vad-model = %s\n", params.vad_model_path.c_str());
