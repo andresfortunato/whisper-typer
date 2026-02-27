@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Whisper Typer
+Comment=Voice-to-text typing tool
+Exec=whisper-typer -m %h/.local/share/whisper-typer/ggml-base.en.bin --daemon
+Type=Application
+Categories=Utility;Accessibility;
+NoDisplay=true

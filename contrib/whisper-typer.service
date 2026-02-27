@@ -1,0 +1,12 @@
+[Unit]
+Description=Whisper-Typer voice-to-text daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/whisper-typer -m %h/.local/share/whisper-typer/ggml-base.en.bin
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

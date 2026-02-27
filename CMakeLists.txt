@@ -72,6 +72,10 @@ endif()
 
 include(GNUInstallDirs)
 install(TARGETS whisper-typer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES contrib/whisper-typer.service
+    DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/user)
+install(FILES contrib/whisper-typer.desktop
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 
 # Tests
 option(BUILD_TESTS "Build unit tests" OFF)
