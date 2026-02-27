@@ -107,6 +107,7 @@ static void typer_print_usage(int /*argc*/, char ** argv, const typer_params & p
     fprintf(stderr, "  -fa,      --flash-attn        enable flash attention (default)\n");
     fprintf(stderr, "  -nfa,     --no-flash-attn     disable flash attention\n");
     fprintf(stderr, "  -tr,      --translate         translate to English\n");
+    fprintf(stderr, "  -ac N,    --audio-ctx N   [%-7d] audio context size (0 = full)\n",            params.audio_ctx);
     fprintf(stderr, "            --hotkey KEY    [%-7s] global hotkey\n",                            params.hotkey.c_str());
     fprintf(stderr, "            --push-to-talk       hold-to-record mode\n");
     fprintf(stderr, "            --silence-ms N  [%-7d] silence to auto-stop (ms)\n",               params.silence_ms);

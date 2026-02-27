@@ -15,7 +15,6 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <errno.h>
-#include <poll.h>
 
 // Timeout for subprocess calls (xclip, xdotool)
 static constexpr int CMD_TIMEOUT_MS = 5000;
