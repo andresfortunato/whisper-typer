@@ -287,6 +287,19 @@ int main(int argc, char ** argv) {
     }
 #endif
 
+    // Fire-and-forget notification via notify-send (if available)
+    auto notify = [](const char * summary, int timeout_ms) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); close(devnull); }
+            std::string t = std::to_string(timeout_ms);
+            execlp("notify-send", "notify-send", "-t", t.c_str(), "whisper-typer", summary, nullptr);
+            _exit(127);
+        }
+        // Don't wait — fire and forget (child is reaped by SIGCHLD or init)
+    };
+
     // Check runtime dependencies (using 'command -v' which is POSIX-standard)
     auto check_dep = [](const char * prog) -> bool {
         pid_t pid = fork();
@@ -309,6 +322,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "error: xclip not found. Install with: sudo apt install xclip\n");
         return 1;
     }
+    bool has_notify = check_dep("notify-send");
 
     // Single-instance lock
 #ifdef __linux__
@@ -490,6 +504,7 @@ int main(int argc, char ** argv) {
 
                     state = State::RECORDING;
                     fprintf(stderr, "[recording...]\n");
+                    if (has_notify) notify("Recording...", 1000);
                 } else {
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
@@ -593,6 +608,7 @@ int main(int argc, char ** argv) {
                 }
 
                 fprintf(stderr, "[transcribing %d ms of audio...]\n", (int)(pcmf32.size() * 1000.0f / WHISPER_SAMPLE_RATE));
+                if (has_notify) notify("Transcribing...", 2000);
 
                 std::string text = transcribe(ctx, params, pcmf32);
 
