@@ -6,9 +6,11 @@
 #include <string>
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 #include <thread>
 #include <chrono>
 #include <array>
+#include <vector>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -262,6 +264,26 @@ bool TextOutput::is_terminal_class(const std::string & cls) {
     std::string lower = cls;
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return std::tolower(c); });
+
+    // Check WHISPER_TYPER_TERMINALS env var for user-added terminals (colon-separated)
+    static std::vector<std::string> extra_terminals = []() {
+        std::vector<std::string> result;
+        const char * env = getenv("WHISPER_TYPER_TERMINALS");
+        if (env) {
+            std::istringstream ss(env);
+            std::string term;
+            while (std::getline(ss, term, ':')) {
+                std::transform(term.begin(), term.end(), term.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                if (!term.empty()) result.push_back(term);
+            }
+        }
+        return result;
+    }();
+
+    for (const auto & t : extra_terminals) {
+        if (lower == t) return true;
+    }
 
     static const char * terminals[] = {
         "alacritty",
