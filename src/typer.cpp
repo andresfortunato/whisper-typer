@@ -265,12 +265,25 @@ int main(int argc, char ** argv) {
 
     // Single-instance lock
 #ifdef __linux__
-    int lock_fd = open("/tmp/whisper-typer.lock", O_CREAT | O_RDWR, 0600);
+    std::string lock_path;
+    const char * xdg_runtime = getenv("XDG_RUNTIME_DIR");
+    if (xdg_runtime && xdg_runtime[0] != '\0') {
+        lock_path = std::string(xdg_runtime) + "/whisper-typer.lock";
+    } else {
+        lock_path = "/tmp/whisper-typer.lock";
+    }
+    int lock_fd = open(lock_path.c_str(), O_CREAT | O_RDWR, 0600);
     if (lock_fd >= 0) {
         if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0) {
             fprintf(stderr, "error: another whisper-typer instance is already running\n");
             close(lock_fd);
             return 1;
+        }
+        // Write PID to lock file for --stop support
+        if (ftruncate(lock_fd, 0) == 0) {
+            std::string pid_str = std::to_string(getpid());
+            // NOLINTNEXTLINE - write result intentionally ignored for lock file
+            (void)write(lock_fd, pid_str.c_str(), pid_str.size());
         }
         // Keep lock_fd open for the lifetime of the process
     }
