@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -92,6 +93,69 @@ static bool parse_float(const char * s, float & out) {
         fprintf(stderr, "error: invalid number '%s'\n", s);
         return false;
     }
+}
+
+static bool load_config_file(typer_params & params) {
+    std::string config_path;
+    const char * xdg_config = getenv("XDG_CONFIG_HOME");
+    if (xdg_config && xdg_config[0] != '\0') {
+        config_path = std::string(xdg_config) + "/whisper-typer/config";
+    } else {
+        const char * home = getenv("HOME");
+        if (!home) return false;
+        config_path = std::string(home) + "/.config/whisper-typer/config";
+    }
+
+    std::ifstream f(config_path);
+    if (!f.is_open()) return false;
+
+    fprintf(stderr, "whisper-typer: loading config from %s\n", config_path.c_str());
+
+    std::string line;
+    int line_num = 0;
+    while (std::getline(f, line)) {
+        line_num++;
+        // Strip comments and whitespace
+        auto comment_pos = line.find('#');
+        if (comment_pos != std::string::npos) line.erase(comment_pos);
+        while (!line.empty() && std::isspace((unsigned char)line.front())) line.erase(line.begin());
+        while (!line.empty() && std::isspace((unsigned char)line.back()))  line.pop_back();
+        if (line.empty()) continue;
+
+        auto eq_pos = line.find('=');
+        if (eq_pos == std::string::npos) {
+            fprintf(stderr, "config:%d: missing '=' in '%s'\n", line_num, line.c_str());
+            continue;
+        }
+
+        std::string key = line.substr(0, eq_pos);
+        std::string val = line.substr(eq_pos + 1);
+        while (!key.empty() && std::isspace((unsigned char)key.back()))  key.pop_back();
+        while (!val.empty() && std::isspace((unsigned char)val.front())) val.erase(val.begin());
+
+        if      (key == "threads")        { parse_int(val.c_str(), params.n_threads); }
+        else if (key == "model")          { params.model = val; }
+        else if (key == "language")       { params.language = val; }
+        else if (key == "capture")        { parse_int(val.c_str(), params.capture_id); }
+        else if (key == "no-gpu")         { params.use_gpu = (val != "true" && val != "1"); }
+        else if (key == "flash-attn")     { params.flash_attn = (val == "true" || val == "1"); }
+        else if (key == "translate")      { params.translate = (val == "true" || val == "1"); }
+        else if (key == "audio-ctx")      { parse_int(val.c_str(), params.audio_ctx); }
+        else if (key == "hotkey")         { params.hotkey = val; }
+        else if (key == "push-to-talk")   { params.push_to_talk = (val == "true" || val == "1"); }
+        else if (key == "silence-ms")     { parse_int(val.c_str(), params.silence_ms); }
+        else if (key == "max-record-ms")  { parse_int(val.c_str(), params.max_record_ms); }
+        else if (key == "vad-thold")      { parse_float(val.c_str(), params.vad_thold); }
+        else if (key == "freq-thold")     { parse_float(val.c_str(), params.freq_thold); }
+        else if (key == "vad-model")      { params.vad_model_path = val; }
+        else if (key == "no-clipboard")   { params.use_clipboard = !(val == "true" || val == "1"); }
+        else if (key == "type-delay-ms")  { parse_int(val.c_str(), params.type_delay_ms); }
+        else if (key == "daemon")         { params.daemonize = (val == "true" || val == "1"); }
+        else {
+            fprintf(stderr, "config:%d: unknown key '%s'\n", line_num, key.c_str());
+        }
+    }
+    return true;
 }
 
 static void typer_print_usage(int /*argc*/, char ** argv, const typer_params & params) {
@@ -238,6 +302,7 @@ int main(int argc, char ** argv) {
     ggml_backend_load_all();
 
     typer_params params;
+    load_config_file(params);  // config file first; CLI overrides
 
     if (!typer_params_parse(argc, argv, params)) {
         return 1;
