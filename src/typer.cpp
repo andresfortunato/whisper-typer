@@ -60,6 +60,7 @@ struct typer_params {
 
     // daemon
     bool        daemonize      = false;
+    bool        stop_daemon    = false;
     bool        print_energy   = false;
 };
 
@@ -118,6 +119,7 @@ static void typer_print_usage(int /*argc*/, char ** argv, const typer_params & p
     fprintf(stderr, "            --no-clipboard       use keystroke simulation\n");
     fprintf(stderr, "            --type-delay-ms N[%-6d] keystroke delay (ms)\n",                   params.type_delay_ms);
     fprintf(stderr, "            --daemon             run as background daemon\n");
+    fprintf(stderr, "            --stop               stop running daemon\n");
     fprintf(stderr, "  -pe,      --print-energy       print audio energy levels\n");
     fprintf(stderr, "\n");
 }
@@ -158,6 +160,7 @@ static bool typer_params_parse(int argc, char ** argv, typer_params & params) {
         else if (                 arg == "--no-clipboard")   { params.use_clipboard      = false; }
         else if (                 arg == "--type-delay-ms")  { auto v = next_arg(); if (!v || !parse_int(v, params.type_delay_ms)) return false; }
         else if (                 arg == "--daemon")         { params.daemonize           = true; }
+        else if (                 arg == "--stop")           { params.stop_daemon         = true; }
         else if (arg == "-pe"  || arg == "--print-energy")   { params.print_energy        = true; }
         else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
@@ -239,6 +242,50 @@ int main(int argc, char ** argv) {
     if (!typer_params_parse(argc, argv, params)) {
         return 1;
     }
+
+    // Handle --stop: send SIGTERM to running daemon and exit
+#ifdef __linux__
+    if (params.stop_daemon) {
+        std::string stop_lock_path;
+        const char * stop_xdg = getenv("XDG_RUNTIME_DIR");
+        if (stop_xdg && stop_xdg[0] != '\0') {
+            stop_lock_path = std::string(stop_xdg) + "/whisper-typer.lock";
+        } else {
+            stop_lock_path = "/tmp/whisper-typer.lock";
+        }
+        int stop_fd = open(stop_lock_path.c_str(), O_RDONLY);
+        if (stop_fd < 0) {
+            fprintf(stderr, "error: no running daemon found (no lock file)\n");
+            return 1;
+        }
+        // Try to acquire lock — if we can, no daemon is running
+        if (flock(stop_fd, LOCK_EX | LOCK_NB) == 0) {
+            flock(stop_fd, LOCK_UN);
+            close(stop_fd);
+            fprintf(stderr, "error: no running daemon found\n");
+            return 1;
+        }
+        // Read PID from lock file
+        char pid_buf[32] = {};
+        ssize_t n = read(stop_fd, pid_buf, sizeof(pid_buf) - 1);
+        close(stop_fd);
+        if (n <= 0) {
+            fprintf(stderr, "error: could not read PID from lock file\n");
+            return 1;
+        }
+        pid_t daemon_pid = atoi(pid_buf);
+        if (daemon_pid <= 0) {
+            fprintf(stderr, "error: invalid PID in lock file\n");
+            return 1;
+        }
+        if (kill(daemon_pid, SIGTERM) != 0) {
+            fprintf(stderr, "error: failed to send SIGTERM to PID %d: %s\n", daemon_pid, strerror(errno));
+            return 1;
+        }
+        fprintf(stderr, "whisper-typer: sent SIGTERM to PID %d\n", daemon_pid);
+        return 0;
+    }
+#endif
 
     // Check runtime dependencies (using 'command -v' which is POSIX-standard)
     auto check_dep = [](const char * prog) -> bool {
