@@ -179,7 +179,7 @@ bool HotkeyListener::open_keyboards() {
         if (strncmp(ent->d_name, "event", 5) != 0) continue;
 
         std::string path = std::string("/dev/input/") + ent->d_name;
-        int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+        int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0) continue;
 
         // Check if this device has EV_KEY capability
@@ -300,7 +300,7 @@ bool HotkeyListener::start(HotkeyCallback callback) {
 }
 
 void HotkeyListener::stop() {
-    if (!m_running && m_impl->fds.empty()) return;
+    if (!m_running && !m_thread.joinable() && m_impl->fds.empty()) return;
 
     m_running = false;
 
@@ -360,6 +360,9 @@ void HotkeyListener::listen_thread() {
                 if (n == (ssize_t)sizeof(ev)) {
                     // Successfully read an event
                 } else {
+                    if (n < 0 && errno == EINTR) {
+                        continue; // retry read on signal interrupt
+                    }
                     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                         break; // No more events, normal for O_NONBLOCK
                     }
