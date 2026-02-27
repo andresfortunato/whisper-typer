@@ -3,6 +3,7 @@ project(whisper-typer LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Configure whisper.cpp build: enable SDL2, disable examples and tests
 set(WHISPER_SDL2 ON CACHE BOOL "" FORCE)
@@ -63,3 +64,7 @@ target_link_libraries(whisper-typer PRIVATE
     whisper
     ${CMAKE_THREAD_LIBS_INIT}
 )
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(whisper-typer PRIVATE -Wall -Wextra -Wpedantic)
+endif()
