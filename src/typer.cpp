@@ -9,8 +9,12 @@
 #include "whisper.h"
 #include "hotkey.h"
 #include "text-output.h"
+#ifdef HAS_TRAY
+#include "tray.h"
+#endif
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -59,10 +63,19 @@ struct typer_params {
     bool        use_clipboard  = true;
     int32_t     type_delay_ms  = 12;
 
+    // history
+    bool        no_history        = false;
+    std::string history_file;
+    int32_t     max_history_mb    = 10;
+
+    // tray
+    bool        no_tray        = false;
+
     // daemon
     bool        daemonize      = false;
     bool        stop_daemon    = false;
     bool        print_energy   = false;
+    bool        threads_explicit = false;
 };
 
 static bool parse_int(const char * s, int32_t & out) {
@@ -133,7 +146,7 @@ static bool load_config_file(typer_params & params) {
         while (!key.empty() && std::isspace((unsigned char)key.back()))  key.pop_back();
         while (!val.empty() && std::isspace((unsigned char)val.front())) val.erase(val.begin());
 
-        if      (key == "threads")        { parse_int(val.c_str(), params.n_threads); }
+        if      (key == "threads")        { parse_int(val.c_str(), params.n_threads); params.threads_explicit = true; }
         else if (key == "model")          { params.model = val; }
         else if (key == "language")       { params.language = val; }
         else if (key == "capture")        { parse_int(val.c_str(), params.capture_id); }
@@ -150,6 +163,10 @@ static bool load_config_file(typer_params & params) {
         else if (key == "vad-model")      { params.vad_model_path = val; }
         else if (key == "no-clipboard")   { params.use_clipboard = !(val == "true" || val == "1"); }
         else if (key == "type-delay-ms")  { parse_int(val.c_str(), params.type_delay_ms); }
+        else if (key == "no-tray")        { params.no_tray = (val == "true" || val == "1"); }
+        else if (key == "no-history")     { params.no_history = (val == "true" || val == "1"); }
+        else if (key == "history-file")   { params.history_file = val; }
+        else if (key == "max-history-mb") { parse_int(val.c_str(), params.max_history_mb); }
         else if (key == "daemon")         { params.daemonize = (val == "true" || val == "1"); }
         else {
             fprintf(stderr, "config:%d: unknown key '%s'\n", line_num, key.c_str());
@@ -182,6 +199,10 @@ static void typer_print_usage(int /*argc*/, char ** argv, const typer_params & p
     fprintf(stderr, "            --vad-model F        Silero VAD model path\n");
     fprintf(stderr, "            --no-clipboard       use keystroke simulation\n");
     fprintf(stderr, "            --type-delay-ms N[%-6d] keystroke delay (ms)\n",                   params.type_delay_ms);
+    fprintf(stderr, "            --no-tray            disable system tray icon\n");
+    fprintf(stderr, "            --no-history         disable transcript history\n");
+    fprintf(stderr, "            --history-file F     custom history file path\n");
+    fprintf(stderr, "            --max-history-mb N   max history file size (MB, default 10)\n");
     fprintf(stderr, "            --daemon             run as background daemon\n");
     fprintf(stderr, "            --stop               stop running daemon\n");
     fprintf(stderr, "  -pe,      --print-energy       print audio energy levels\n");
@@ -205,7 +226,7 @@ static bool typer_params_parse(int argc, char ** argv, typer_params & params) {
             typer_print_usage(argc, argv, params);
             exit(0);
         }
-        else if (arg == "-t"   || arg == "--threads")        { auto v = next_arg(); if (!v || !parse_int(v, params.n_threads))      return false; }
+        else if (arg == "-t"   || arg == "--threads")        { auto v = next_arg(); if (!v || !parse_int(v, params.n_threads))      return false; params.threads_explicit = true; }
         else if (arg == "-m"   || arg == "--model")          { auto v = next_arg(); if (!v) return false; params.model           = v; }
         else if (arg == "-l"   || arg == "--language")       { auto v = next_arg(); if (!v) return false; params.language         = v; }
         else if (arg == "-c"   || arg == "--capture")        { auto v = next_arg(); if (!v || !parse_int(v, params.capture_id))    return false; }
@@ -223,6 +244,10 @@ static bool typer_params_parse(int argc, char ** argv, typer_params & params) {
         else if (                 arg == "--vad-model")      { auto v = next_arg(); if (!v) return false; params.vad_model_path     = v; }
         else if (                 arg == "--no-clipboard")   { params.use_clipboard      = false; }
         else if (                 arg == "--type-delay-ms")  { auto v = next_arg(); if (!v || !parse_int(v, params.type_delay_ms)) return false; }
+        else if (                 arg == "--no-tray")          { params.no_tray               = true; }
+        else if (                 arg == "--no-history")      { params.no_history            = true; }
+        else if (                 arg == "--history-file")   { auto v = next_arg(); if (!v) return false; params.history_file = v; }
+        else if (                 arg == "--max-history-mb") { auto v = next_arg(); if (!v || !parse_int(v, params.max_history_mb)) return false; }
         else if (                 arg == "--daemon")         { params.daemonize           = true; }
         else if (                 arg == "--stop")           { params.stop_daemon         = true; }
         else if (arg == "-pe"  || arg == "--print-energy")   { params.print_energy        = true; }
@@ -298,6 +323,81 @@ static void sigusr1_handler(int /*sig*/) {
 }
 #endif
 
+// Escape a string for safe inclusion in a JSON value
+static std::string json_escape_string(const std::string & s) {
+    std::string out;
+    out.reserve(s.size() + 16);
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if ((unsigned char)c < 0x20) {
+                    char buf[8]; snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
+// Create directories recursively (like mkdir -p)
+static void mkdir_p(const std::string & path) {
+    std::string accum;
+    for (size_t i = 0; i < path.size(); i++) {
+        accum += path[i];
+        if (path[i] == '/' && i > 0) {
+            mkdir(accum.c_str(), 0755);
+        }
+    }
+    mkdir(path.c_str(), 0755);
+}
+
+// Append a transcript entry to the history file (JSONL format)
+static void history_append(const std::string & path, const std::string & text,
+                           int duration_ms, int32_t max_mb) {
+    if (path.empty() || text.empty()) return;
+
+    // Create parent directory
+    auto slash = path.rfind('/');
+    if (slash != std::string::npos) mkdir_p(path.substr(0, slash));
+
+    // Rotation: if file exceeds max_mb, keep newest half of entries
+    struct stat st;
+    if (stat(path.c_str(), &st) == 0 && st.st_size > (int64_t)max_mb * 1024 * 1024) {
+        std::ifstream in(path);
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(in, line)) lines.push_back(std::move(line));
+        in.close();
+
+        size_t keep = lines.size() / 2;
+        std::ofstream out(path, std::ios::trunc);
+        for (size_t i = lines.size() - keep; i < lines.size(); i++) {
+            out << lines[i] << "\n";
+        }
+        fprintf(stderr, "history: rotated (kept %zu of %zu entries)\n", keep, lines.size());
+    }
+
+    // ISO 8601 UTC timestamp
+    auto now = std::chrono::system_clock::now();
+    auto tt = std::chrono::system_clock::to_time_t(now);
+    struct tm utc; gmtime_r(&tt, &utc);
+    char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &utc);
+
+    // Append JSONL line
+    FILE * f = fopen(path.c_str(), "a");
+    if (!f) { fprintf(stderr, "warning: cannot open history: %s\n", path.c_str()); return; }
+    fprintf(f, "{\"ts\":\"%s\",\"text\":\"%s\",\"duration_ms\":%d}\n",
+            ts, json_escape_string(text).c_str(), duration_ms);
+    fclose(f);
+}
+
 int main(int argc, char ** argv) {
     ggml_backend_load_all();
 
@@ -306,6 +406,27 @@ int main(int argc, char ** argv) {
 
     if (!typer_params_parse(argc, argv, params)) {
         return 1;
+    }
+
+    // Cap threads to 2 in daemon mode unless explicitly set
+    if (params.daemonize && !params.threads_explicit && params.n_threads > 2) {
+        params.n_threads = 2;
+    }
+
+    // Resolve history file path
+    std::string history_path;
+    if (!params.no_history) {
+        if (!params.history_file.empty()) {
+            history_path = params.history_file;
+        } else {
+            const char * xdg_data = getenv("XDG_DATA_HOME");
+            if (xdg_data && xdg_data[0] != '\0') {
+                history_path = std::string(xdg_data) + "/whisper-typer/history.jsonl";
+            } else {
+                const char * home = getenv("HOME");
+                if (home) history_path = std::string(home) + "/.local/share/whisper-typer/history.jsonl";
+            }
+        }
     }
 
     // Handle --stop: send SIGTERM to running daemon and exit
@@ -365,19 +486,24 @@ int main(int argc, char ** argv) {
         // Don't wait — fire and forget (child is reaped by SIGCHLD or init)
     };
 
-    // Check runtime dependencies (using 'command -v' which is POSIX-standard)
+    // Check if a program exists in PATH (no shell, no fork — pure access() search)
     auto check_dep = [](const char * prog) -> bool {
-        pid_t pid = fork();
-        if (pid < 0) return false;
-        if (pid == 0) {
-            int devnull = open("/dev/null", O_WRONLY);
-            if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); close(devnull); }
-            execlp("sh", "sh", "-c", (std::string("command -v ") + prog).c_str(), nullptr);
-            _exit(127);
+        if (!prog || prog[0] == '\0') return false;
+        const char * path_env = getenv("PATH");
+        if (!path_env) return false;
+        std::string path_str(path_env);
+        size_t start = 0;
+        while (start <= path_str.size()) {
+            size_t end = path_str.find(':', start);
+            if (end == std::string::npos) end = path_str.size();
+            std::string dir = path_str.substr(start, end - start);
+            if (!dir.empty()) {
+                std::string full = dir + "/" + prog;
+                if (access(full.c_str(), X_OK) == 0) return true;
+            }
+            start = end + 1;
         }
-        int status;
-        waitpid(pid, &status, 0);
-        return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        return false;
     };
     // Detect display backend
     DisplayBackend display = detect_display_backend();
@@ -445,6 +571,9 @@ int main(int argc, char ** argv) {
         }
         // Child: new session, detach from terminal
         setsid();
+        if (nice(10) == -1 && errno != 0) {
+            perror("nice");
+        }
         if (chdir("/") != 0) {
             perror("chdir");
         }
@@ -525,6 +654,21 @@ int main(int argc, char ** argv) {
     output.set_use_clipboard(params.use_clipboard);
     output.set_type_delay_ms(params.type_delay_ms);
 
+    // Init system tray icon
+#ifdef HAS_TRAY
+    TrayIcon tray;
+    bool tray_ok = false;
+    std::string last_transcript;
+    if (!params.no_tray) {
+        TrayCallbacks cb;
+        cb.on_toggle = [&]() { g_sigusr1 = true; };
+        cb.on_quit   = [&]() { g_running = false; };
+        cb.get_last_transcript = [&]() { return last_transcript; };
+        cb.get_history_path    = [&]() { return history_path; };
+        tray_ok = tray.init(cb);
+    }
+#endif
+
     // Print info
     fprintf(stderr, "\n");
     fprintf(stderr, "whisper-typer:\n");
@@ -538,6 +682,9 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "  clipboard = %s\n", params.use_clipboard ? "yes" : "no");
     if (!params.vad_model_path.empty()) {
         fprintf(stderr, "  vad-model = %s\n", params.vad_model_path.c_str());
+    }
+    if (!history_path.empty()) {
+        fprintf(stderr, "  history   = %s\n", history_path.c_str());
     }
     fprintf(stderr, "\n");
 
@@ -567,6 +714,10 @@ int main(int argc, char ** argv) {
             break;
         }
 
+#ifdef HAS_TRAY
+        if (tray_ok) tray.poll();
+#endif
+
         switch (state) {
             case State::IDLE: {
                 // Check for hotkey or SIGUSR1 toggle
@@ -585,6 +736,9 @@ int main(int argc, char ** argv) {
                     hotkey.poll_released();
 
                     state = State::RECORDING;
+#ifdef HAS_TRAY
+                    if (tray_ok) tray.set_state(TrayState::RECORDING);
+#endif
                     fprintf(stderr, "[recording...]\n");
                     if (has_notify) notify("Recording...", 1000);
                 } else {
@@ -677,6 +831,9 @@ int main(int argc, char ** argv) {
                 if (pcmf32.empty()) {
                     fprintf(stderr, "[no audio captured]\n");
                     state = State::IDLE;
+#ifdef HAS_TRAY
+                    if (tray_ok) tray.set_state(TrayState::IDLE);
+#endif
                     fprintf(stderr, "[ready]\n");
                     break;
                 }
@@ -685,10 +842,16 @@ int main(int argc, char ** argv) {
                 if (!speech_detected) {
                     fprintf(stderr, "[no speech detected, skipping]\n");
                     state = State::IDLE;
+#ifdef HAS_TRAY
+                    if (tray_ok) tray.set_state(TrayState::IDLE);
+#endif
                     fprintf(stderr, "[ready]\n");
                     break;
                 }
 
+#ifdef HAS_TRAY
+                if (tray_ok) tray.set_state(TrayState::TRANSCRIBING);
+#endif
                 fprintf(stderr, "[transcribing %d ms of audio...]\n", (int)(pcmf32.size() * 1000.0f / WHISPER_SAMPLE_RATE));
                 if (has_notify) notify("Transcribing...", 2000);
 
@@ -700,11 +863,24 @@ int main(int argc, char ** argv) {
                 if (!text.empty()) {
                     fprintf(stderr, "[result: \"%s\"]\n", text.c_str());
                     output.type(text);
+                    if (!history_path.empty()) {
+                        int dur = (int)(pcmf32.size() * 1000.0f / WHISPER_SAMPLE_RATE);
+                        history_append(history_path, text, dur, params.max_history_mb);
+                    }
+#ifdef HAS_TRAY
+                    if (tray_ok) {
+                        last_transcript = text;
+                        tray.set_last_transcript(text);
+                    }
+#endif
                 } else {
                     fprintf(stderr, "[empty transcription]\n");
                 }
 
                 state = State::IDLE;
+#ifdef HAS_TRAY
+                if (tray_ok) tray.set_state(TrayState::IDLE);
+#endif
                 fprintf(stderr, "[ready]\n");
                 break;
             }
@@ -712,6 +888,9 @@ int main(int argc, char ** argv) {
     }
 
     // Cleanup
+#ifdef HAS_TRAY
+    if (tray_ok) tray.shutdown();
+#endif
     hotkey.stop();
     audio.pause();
     whisper_print_timings(ctx);

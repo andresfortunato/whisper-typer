@@ -16,6 +16,23 @@ add_subdirectory(whisper.cpp)
 find_package(SDL2 REQUIRED)
 find_package(Threads REQUIRED)
 
+# Optional system tray support via ayatana-appindicator3
+option(ENABLE_TRAY "Build with system tray support" ON)
+if(ENABLE_TRAY)
+    find_package(PkgConfig)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(APPINDICATOR ayatana-appindicator3-0.1)
+    endif()
+    if(APPINDICATOR_FOUND)
+        set(HAS_TRAY ON)
+    else()
+        set(HAS_TRAY OFF)
+        message(STATUS "Tray disabled: libayatana-appindicator3-dev not found")
+    endif()
+else()
+    set(HAS_TRAY OFF)
+endif()
+
 set(EXAMPLES_DIR ${CMAKE_SOURCE_DIR}/whisper.cpp/examples)
 
 # Build the common library (normally built by examples/CMakeLists.txt)
@@ -70,12 +87,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(whisper-typer PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+if(HAS_TRAY)
+    target_sources(whisper-typer PRIVATE src/tray.cpp)
+    target_include_directories(whisper-typer PRIVATE ${APPINDICATOR_INCLUDE_DIRS})
+    target_link_libraries(whisper-typer PRIVATE ${APPINDICATOR_LIBRARIES})
+    target_compile_definitions(whisper-typer PRIVATE HAS_TRAY=1)
+endif()
+
 include(GNUInstallDirs)
 install(TARGETS whisper-typer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES contrib/whisper-typer.service
     DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/user)
 install(FILES contrib/whisper-typer.desktop
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(FILES contrib/whisper-typer.desktop
+    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/xdg/autostart)
 
 # Tests
 option(BUILD_TESTS "Build unit tests" OFF)
@@ -106,4 +132,18 @@ if(BUILD_TESTS)
         target_compile_options(test-terminal PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
     endif()
     add_test(NAME terminal COMMAND test-terminal)
+
+    add_executable(test-history tests/test_history.cpp)
+    target_compile_features(test-history PRIVATE cxx_std_17)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test-history PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME history COMMAND test-history)
+
+    add_executable(test-check-dep tests/test_check_dep.cpp)
+    target_compile_features(test-check-dep PRIVATE cxx_std_17)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test-check-dep PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME check-dep COMMAND test-check-dep)
 endif()

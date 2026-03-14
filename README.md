@@ -15,6 +15,8 @@ Voice-to-text typing tool for Linux. Records speech via a global hotkey, transcr
 - **Desktop notifications** via notify-send (optional)
 - **Config file support** for persistent settings
 - **Silero VAD** integration for improved voice activity detection
+- **Transcript history** in JSONL format with automatic rotation
+- **System tray icon** with status, controls, and clipboard integration (optional)
 
 ## Dependencies
 
@@ -32,6 +34,20 @@ Voice-to-text typing tool for Linux. Records speech via a global hotkey, transcr
 
 **Optional:**
 - notify-send (desktop notifications on recording/transcription events)
+- libayatana-appindicator3-dev (system tray icon)
+
+## Quick Install
+
+Run the install script from the repo root:
+
+```bash
+git clone --recursive https://github.com/andresfortunato/whisper-typer.git
+cd whisper-typer
+./install.sh
+```
+
+This installs build and runtime dependencies, builds the project, downloads the
+default model (base.en), creates a config file, and optionally sets up hotkey access.
 
 ## Build
 
@@ -47,6 +63,15 @@ To reduce clone size (~176 MB for the whisper.cpp submodule), use a shallow clon
 ```bash
 git clone --recursive --shallow-submodules --depth 1 \
     https://github.com/andresfortunato/whisper-typer.git
+```
+
+### Build without System Tray
+
+To build without the system tray icon (e.g., on a headless server or without GTK3):
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_TRAY=OFF
+cmake --build build -j$(nproc)
 ```
 
 ### GPU Acceleration
@@ -69,7 +94,7 @@ sudo cmake --install build
 This installs:
 - `whisper-typer` binary to `/usr/local/bin/`
 - systemd user service to `/usr/local/lib/systemd/user/`
-- desktop file to `/usr/local/share/applications/`
+- desktop file to `/usr/local/share/applications/` and `/usr/local/etc/xdg/autostart/`
 
 ### Model Download
 
@@ -100,6 +125,9 @@ hotkey=ctrl+period
 push-to-talk=false
 silence-ms=1500
 type-delay-ms=12
+no-tray=false
+no-history=false
+max-history-mb=10
 ```
 
 ### CLI Options
@@ -108,7 +136,7 @@ type-delay-ms=12
 |------|---------|-------------|
 | `-m`, `--model` | `models/ggml-base.en.bin` | Path to whisper model |
 | `-l`, `--language` | `en` | Spoken language (`auto` for detection) |
-| `-t`, `--threads` | `4` | Number of inference threads |
+| `-t`, `--threads` | `4` (2 in daemon mode) | Number of inference threads |
 | `-c`, `--capture` | `-1` | Audio capture device ID |
 | `-ac`, `--audio-ctx` | `0` | Audio context size (0 = full) |
 | `-ng`, `--no-gpu` | | Disable GPU inference |
@@ -124,6 +152,10 @@ type-delay-ms=12
 | `--vad-model` | | Path to Silero VAD model |
 | `--no-clipboard` | | Use keystroke simulation instead of clipboard |
 | `--type-delay-ms` | `12` | Delay between keystrokes (ms) |
+| `--no-tray` | | Disable system tray icon |
+| `--no-history` | | Disable transcript history |
+| `--history-file` | XDG default | Custom history file path |
+| `--max-history-mb` | `10` | Max history file size before rotation (MB) |
 | `--daemon` | | Run as background daemon |
 | `--stop` | | Stop a running daemon |
 | `-pe`, `--print-energy` | | Print audio energy levels |
@@ -167,14 +199,30 @@ whisper-typer -m path/to/model.bin --daemon
 whisper-typer --stop   # stop the daemon
 ```
 
-### systemd Service
+In daemon mode, threads default to 2 (instead of 4) and the process runs at nice level 10. Override with `--threads N`.
+
+### Auto-Start on Login
+
+**Method 1: XDG Autostart** (recommended)
+
+Copy the desktop file to your autostart directory:
+
+```bash
+cp contrib/whisper-typer.desktop ~/.config/autostart/
+```
+
+Set your model path in the config file (`~/.config/whisper-typer/config`) so the desktop entry doesn't need it on the command line.
+
+**Method 2: systemd**
 
 ```bash
 systemctl --user enable whisper-typer
 systemctl --user start whisper-typer
 ```
 
-Edit the service file to customize the model path and options.
+Edit the service file to customize the model path and options. The service runs with `Nice=10` and `IOSchedulingClass=idle` for low system impact.
+
+Both methods use the single-instance lock, so only one instance runs at a time.
 
 ### SIGUSR1 Trigger
 
@@ -185,6 +233,49 @@ kill -USR1 $(pidof whisper-typer)
 ```
 
 This works even when the hotkey is unavailable (e.g., without `input` group membership).
+
+## Transcript History
+
+Every transcription is logged to `~/.local/share/whisper-typer/history.jsonl` (or `$XDG_DATA_HOME/whisper-typer/history.jsonl`). Each line is a JSON object:
+
+```json
+{"ts":"2025-01-15T10:30:00Z","text":"hello world","duration_ms":2500}
+```
+
+| Field | Description |
+|-------|-------------|
+| `ts` | ISO 8601 UTC timestamp |
+| `text` | Transcribed text |
+| `duration_ms` | Audio duration in milliseconds |
+
+The history file is automatically rotated when it exceeds `--max-history-mb` (default 10 MB), keeping the newest half of entries.
+
+Disable with `--no-history` or `no-history=true` in the config file. Use `--history-file` to specify a custom path.
+
+## System Tray Icon
+
+When built with `libayatana-appindicator3-dev`, whisper-typer shows a system tray icon that reflects the current state:
+
+| State | Icon |
+|-------|------|
+| Idle | Microphone |
+| Recording | Record circle |
+| Transcribing | Accessibility |
+
+The tray menu provides:
+- **Show Last Transcript** — display via desktop notification
+- **Copy Last to Clipboard** — copy last transcription
+- **Open History File** — open with default application
+- **Start/Stop Recording** — toggle recording
+- **Quit** — stop whisper-typer
+
+Disable with `--no-tray` or `no-tray=true` in the config file. Build without tray support entirely with `cmake -DENABLE_TRAY=OFF`.
+
+**Install the dependency:**
+
+```bash
+sudo apt install libayatana-appindicator3-dev
+```
 
 ## Troubleshooting
 

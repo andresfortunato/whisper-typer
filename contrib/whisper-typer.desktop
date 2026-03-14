@@ -1,7 +1,9 @@
 [Desktop Entry]
 Name=Whisper Typer
 Comment=Voice-to-text typing tool
-Exec=whisper-typer -m %h/.local/share/whisper-typer/ggml-base.en.bin --daemon
+Exec=whisper-typer --daemon
 Type=Application
 Categories=Utility;Accessibility;
 NoDisplay=true
+X-GNOME-Autostart-enabled=true
+StartupNotify=false

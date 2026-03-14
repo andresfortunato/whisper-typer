@@ -5,6 +5,8 @@ After=graphical-session.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/whisper-typer -m %h/.local/share/whisper-typer/ggml-base.en.bin
+Nice=10
+IOSchedulingClass=idle
 Restart=on-failure
 RestartSec=3
 
