@@ -7,8 +7,10 @@
 
 #include <libayatana-appindicator/app-indicator.h>
 #include <gtk/gtk.h>
-#include <unistd.h>
+#include <cerrno>
 #include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 struct TrayIconImpl {
     AppIndicator * indicator = nullptr;
@@ -24,10 +26,12 @@ struct TrayIconImpl {
     TrayState      state = TrayState::IDLE;
 };
 
-// Fire-and-forget subprocess (same pattern as text-output.cpp)
+// Fire-and-forget subprocess using double-fork (no zombies)
 static void run_detached(const char * const argv[]) {
     pid_t pid = fork();
+    if (pid < 0) return;
     if (pid == 0) {
+        if (fork() != 0) _exit(0);
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) {
             dup2(devnull, STDOUT_FILENO);
@@ -37,9 +41,11 @@ static void run_detached(const char * const argv[]) {
         execvp(argv[0], const_cast<char * const *>(argv));
         _exit(127);
     }
+    int status;
+    waitpid(pid, &status, 0);
 }
 
-// Copy text to clipboard using xclip or wl-copy
+// Copy text to clipboard using xclip or wl-copy (double-fork, no zombies)
 static void copy_to_clipboard(const std::string & text) {
     int pipefd[2];
     if (pipe(pipefd) != 0) return;
@@ -47,8 +53,17 @@ static void copy_to_clipboard(const std::string & text) {
     const char * wayland = getenv("WAYLAND_DISPLAY");
 
     pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return;
+    }
     if (pid == 0) {
         close(pipefd[1]);
+        if (fork() != 0) {
+            close(pipefd[0]);
+            _exit(0);
+        }
         dup2(pipefd[0], STDIN_FILENO);
         close(pipefd[0]);
 
@@ -67,12 +82,20 @@ static void copy_to_clipboard(const std::string & text) {
         _exit(127);
     }
 
+    // Parent: write data to pipe, then reap intermediate child
     close(pipefd[0]);
-    if (pid > 0) {
-        ssize_t unused_ = write(pipefd[1], text.c_str(), text.size());
-        (void)unused_;
+    const char * data = text.c_str();
+    size_t remaining = text.size();
+    while (remaining > 0) {
+        ssize_t n = write(pipefd[1], data, remaining);
+        if (n > 0) { data += n; remaining -= n; }
+        else if (n < 0 && errno == EINTR) continue;
+        else break;
     }
     close(pipefd[1]);
+
+    int status;
+    waitpid(pid, &status, 0);
 }
 
 // GTK menu callbacks — these are called on the GLib main thread

@@ -476,16 +476,20 @@ int main(int argc, char ** argv) {
 #endif
 
     // Fire-and-forget notification via notify-send (if available)
+    // Uses double-fork so the grandchild is reparented to init (no zombies).
     auto notify = [](const char * summary, int timeout_ms) {
         pid_t pid = fork();
+        if (pid < 0) return;
         if (pid == 0) {
+            if (fork() != 0) _exit(0);
             int devnull = open("/dev/null", O_WRONLY);
             if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); close(devnull); }
             std::string t = std::to_string(timeout_ms);
             execlp("notify-send", "notify-send", "-t", t.c_str(), "whisper-typer", summary, nullptr);
             _exit(127);
         }
-        // Don't wait — fire and forget (child is reaped by SIGCHLD or init)
+        int status;
+        waitpid(pid, &status, 0);
     };
 
     // Check if a program exists in PATH (no shell, no fork — pure access() search)
