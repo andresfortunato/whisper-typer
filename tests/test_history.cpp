@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -75,8 +76,11 @@ static void history_append(const std::string & path, const std::string & text,
     struct tm utc; gmtime_r(&tt, &utc);
     char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &utc);
 
-    FILE * f = fopen(path.c_str(), "a");
-    if (!f) return;
+    // Create with 0600 to protect transcript privacy regardless of umask
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return;
+    FILE * f = fdopen(fd, "a");
+    if (!f) { close(fd); return; }
     fprintf(f, "{\"ts\":\"%s\",\"text\":\"%s\",\"duration_ms\":%d}\n",
             ts, json_escape_string(text).c_str(), duration_ms);
     fclose(f);
@@ -227,6 +231,21 @@ void test_history_empty_text_ignored() {
     check("history_empty_text_ignored", stat(path.c_str(), &st) != 0);
 }
 
+void test_history_file_permissions() {
+    std::string path = temp_path("perms.jsonl");
+    unlink(path.c_str());
+
+    // Set permissive umask to verify history_append overrides it
+    mode_t old_umask = umask(0);
+    history_append(path, "secret transcript", 1000, 10);
+    umask(old_umask);
+
+    struct stat st;
+    check("history_file_permissions",
+          stat(path.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+    unlink(path.c_str());
+}
+
 int main() {
     printf("test_history:\n");
 
@@ -236,6 +255,7 @@ int main() {
     test_history_multiple_appends();
     test_history_rotation();
     test_history_empty_text_ignored();
+    test_history_file_permissions();
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

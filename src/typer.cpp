@@ -390,9 +390,11 @@ static void history_append(const std::string & path, const std::string & text,
     struct tm utc; gmtime_r(&tt, &utc);
     char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &utc);
 
-    // Append JSONL line
-    FILE * f = fopen(path.c_str(), "a");
-    if (!f) { fprintf(stderr, "warning: cannot open history: %s\n", path.c_str()); return; }
+    // Append JSONL line (create with 0600 to protect transcript privacy regardless of umask)
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) { fprintf(stderr, "warning: cannot open history: %s\n", path.c_str()); return; }
+    FILE * f = fdopen(fd, "a");
+    if (!f) { close(fd); fprintf(stderr, "warning: cannot open history: %s\n", path.c_str()); return; }
     fprintf(f, "{\"ts\":\"%s\",\"text\":\"%s\",\"duration_ms\":%d}\n",
             ts, json_escape_string(text).c_str(), duration_ms);
     fclose(f);
