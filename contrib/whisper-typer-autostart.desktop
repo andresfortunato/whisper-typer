@@ -1,9 +1,8 @@
 [Desktop Entry]
 Name=Whisper Typer
-Comment=Voice-to-text typing tool
-Exec=whisper-typer
+Comment=Voice-to-text typing tool (background daemon)
+Exec=whisper-typer --daemon
 Type=Application
 Categories=Utility;Accessibility;
-Icon=audio-input-microphone
-NoDisplay=false
+NoDisplay=true
 StartupNotify=false
