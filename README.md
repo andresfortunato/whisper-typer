@@ -7,7 +7,8 @@ Voice-to-text typing tool for Linux. Records speech via a global hotkey, transcr
 - **Global hotkey** via evdev (works in any window, any desktop environment)
 - **Toggle and push-to-talk modes** for flexible recording control
 - **Automatic silence detection** stops recording when you stop speaking
-- **X11 and Wayland support** (xdotool/xclip on X11, wtype on Wayland)
+- **X11 and Wayland support** (xdotool/xclip on X11, libei on Wayland)
+- **Secure Wayland input** via libei — compositor-mediated, no privileged groups needed
 - **Clipboard and keystroke modes** for text output
 - **Terminal-aware pasting** (Ctrl+Shift+V for terminals, Ctrl+V otherwise)
 - **Daemon mode** with `--stop` command
@@ -24,17 +25,19 @@ Voice-to-text typing tool for Linux. Records speech via a global hotkey, transcr
 - CMake 3.14+
 - C++17 compiler (GCC or Clang)
 - SDL2 (`libsdl2-dev`)
+- libei + liboeffis (`libei-dev`, `liboeffis-dev`) — for Wayland text input
 
 **Runtime (X11):**
 - xdotool
 - xclip (for clipboard mode, the default)
 
 **Runtime (Wayland):**
-- wtype
+- No runtime dependencies — libei is built in and communicates with the compositor directly
 
 **Optional:**
 - notify-send (desktop notifications on recording/transcription events)
 - libayatana-appindicator3-dev (system tray icon)
+- wtype (opt-in Wayland fallback — see [Security: Wayland Text Input](#security-wayland-text-input))
 
 ## Quick Install
 
@@ -47,7 +50,7 @@ cd whisper-typer
 ```
 
 This installs build and runtime dependencies, builds the project, downloads the
-default model (base.en), creates a config file, and optionally sets up hotkey access.
+default model (base.en), and creates a config file.
 
 ## Build
 
@@ -65,13 +68,18 @@ git clone --recursive --shallow-submodules --depth 1 \
     https://github.com/andresfortunato/whisper-typer.git
 ```
 
-### Build without System Tray
+### Optional Build Features
 
-To build without the system tray icon (e.g., on a headless server or without GTK3):
+| CMake Option | Default | Description |
+|-------------|---------|-------------|
+| `ENABLE_GUI` | ON | GUI window (Dear ImGui + SDL2 + OpenGL) |
+| `ENABLE_TRAY` | ON | System tray icon (requires libayatana-appindicator3-dev) |
+| `ENABLE_LIBEI` | ON | libei Wayland input (requires libei-dev, liboeffis-dev) |
+
+Example — build without tray and libei:
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_TRAY=OFF
-cmake --build build -j$(nproc)
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_TRAY=OFF -DENABLE_LIBEI=OFF
 ```
 
 ### GPU Acceleration
@@ -111,6 +119,30 @@ mkdir -p ~/.local/share/whisper-typer
 cp whisper.cpp/models/ggml-base.en.bin ~/.local/share/whisper-typer/
 ```
 
+## Security: Wayland Text Input
+
+whisper-typer uses **libei** for typing on Wayland. libei is a compositor-mediated input emulation protocol — the compositor (e.g. GNOME/Mutter) controls access through the RemoteDesktop portal. On first launch, a consent dialog appears asking you to approve input emulation. No privileged groups or udev rules are needed.
+
+**Requirements:** GNOME 45+ (Mutter with libeis support), libei-dev and liboeffis-dev at build time.
+
+### wtype fallback (opt-in, not recommended)
+
+If libei is unavailable (e.g., on wlroots compositors like Sway or Hyprland), you can opt in to the wtype fallback. **This is disabled by default** because of its security implications:
+
+- wtype uses the `virtual-keyboard-unstable-v1` Wayland protocol
+- On wlroots compositors, **any Wayland client running as your user can inject keystrokes** without approval
+- There is no per-application consent dialog or compositor gating
+- GNOME explicitly rejected this protocol for security reasons
+
+**To enable wtype (if you understand and accept the risk):**
+
+1. Install wtype: `sudo apt install wtype`
+2. Enable the fallback via one of:
+   - Command line: `whisper-typer --allow-wtype`
+   - Config file: add `allow-wtype=true` to `~/.config/whisper-typer/config`
+
+A security warning is printed at startup when wtype is active.
+
 ## Configuration
 
 ### Config File
@@ -125,9 +157,10 @@ hotkey=ctrl+period
 push-to-talk=false
 silence-ms=1500
 type-delay-ms=12
-no-tray=false
+no-gui=false
 no-history=false
 max-history-mb=10
+# allow-wtype=true  # Uncomment only if libei is unavailable (see security notes)
 ```
 
 ### CLI Options
@@ -158,6 +191,7 @@ max-history-mb=10
 | `--max-history-mb` | `10` | Max history file size before rotation (MB) |
 | `--daemon` | | Run as background daemon |
 | `--stop` | | Stop a running daemon |
+| `--allow-wtype` | | Enable wtype fallback for Wayland (see [security notes](#security-wayland-text-input)) |
 | `-pe`, `--print-energy` | | Print audio energy levels |
 
 ### Environment Variables
@@ -289,6 +323,12 @@ sudo usermod -aG input $USER
 ```
 
 If the hotkey is unavailable, whisper-typer will print instructions and you can still use `kill -USR1` to trigger recording.
+
+### Wayland typing not working
+
+- **GNOME 45+**: Make sure `libei-dev` and `liboeffis-dev` were installed before building. Check the build log for "Found libei-1.0" and "Found liboeffis-1.0". On first launch, approve the RemoteDesktop portal consent dialog.
+- **Older GNOME / KDE**: libei may not be supported. Consider upgrading or using `--allow-wtype` with wtype installed.
+- **Sway / Hyprland / wlroots**: libei is not supported. Use `--allow-wtype` with wtype installed (`sudo apt install wtype`).
 
 ### Wayland detection
 
