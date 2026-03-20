@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include "libei-kbd.h"
 
 enum class DisplayBackend { X11, WAYLAND, UNKNOWN };
 
@@ -18,6 +19,11 @@ public:
     void set_use_clipboard(bool use_clipboard);
     void set_type_delay_ms(int delay_ms);
     void set_backend(DisplayBackend backend);
+    void set_allow_wtype(bool allow);
+
+    // Initialize the libei keyboard (Wayland only, compositor-mediated).
+    // Blocks up to 30s for portal consent dialog.
+    bool init_libei();
 
     // Type text into the currently focused window
     bool type(const std::string & text);
@@ -26,12 +32,16 @@ private:
     bool           m_use_clipboard = true;
     int            m_type_delay_ms = 12;
     DisplayBackend m_backend       = DisplayBackend::X11;
+    bool           m_allow_wtype   = false;
+
+    LibeiKbd       m_libei;
 
     // X11 backends
     bool type_xdotool(const std::string & text);
     bool type_clipboard(const std::string & text);
 
     // Wayland backends
+    bool type_libei(const std::string & text);
     bool type_wtype(const std::string & text);
 
     // Check if a window class name is a known terminal

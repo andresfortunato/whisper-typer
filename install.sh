@@ -51,7 +51,7 @@ for cmd in cmake pkg-config; do
 done
 # Also check for libraries via pkg-config
 if command -v pkg-config &>/dev/null; then
-    for lib in sdl2 ayatana-appindicator3-0.1 gtk+-3.0; do
+    for lib in sdl2 gl; do
         if ! pkg-config --exists "$lib" 2>/dev/null; then
             NEED_BUILD_DEPS=1
             break
@@ -60,9 +60,10 @@ if command -v pkg-config &>/dev/null; then
 fi
 
 if [[ $NEED_BUILD_DEPS -eq 1 ]]; then
-    if ask "Install build dependencies (cmake, libsdl2-dev, libayatana-appindicator3-dev, libgtk-3-dev)?"; then
-        sudo apt install -y cmake build-essential libsdl2-dev \
-            libayatana-appindicator3-dev libgtk-3-dev pkg-config
+    if ask "Install build dependencies (cmake, libsdl2-dev, libgl-dev, libei-dev, etc.)?"; then
+        sudo apt install -y cmake build-essential libsdl2-dev libgl-dev \
+            libayatana-appindicator3-dev libgtk-3-dev pkg-config \
+            libei-dev liboeffis-dev
         ok "Build dependencies installed."
     else
         warn "Skipping build dependencies. Build may fail if they are missing."
@@ -126,7 +127,8 @@ info "Step 6: Runtime dependencies"
 RUNTIME_PKGS="libnotify-bin"
 if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
     info "Detected Wayland session."
-    RUNTIME_PKGS="$RUNTIME_PKGS wtype wl-clipboard"
+    info "  libei is the primary typing backend (built-in, no runtime deps)."
+    info "  wtype is an opt-in fallback (--allow-wtype). See security notes."
 elif [[ -n "${DISPLAY:-}" ]]; then
     info "Detected X11 session."
     RUNTIME_PKGS="$RUNTIME_PKGS xdotool xclip"
@@ -171,30 +173,13 @@ hotkey=ctrl+period
 push-to-talk=false
 silence-ms=1500
 type-delay-ms=12
-no-tray=false
+no-gui=false
 no-history=false
 max-history-mb=10
 EOF
         ok "Config file created."
     else
         warn "Skipping config file creation."
-    fi
-fi
-
-# --- Step 8: Input group ---
-echo ""
-info "Step 8: Input group (for global hotkey)"
-if groups | grep -qw input; then
-    ok "Already in the 'input' group."
-else
-    warn "You are not in the 'input' group."
-    warn "The global hotkey requires read access to /dev/input/event* devices."
-    if ask "Add $USER to the 'input' group? (requires sudo)"; then
-        sudo usermod -aG input "$USER"
-        ok "Added $USER to 'input' group."
-        warn "You must log out and back in for this to take effect."
-    else
-        warn "Skipping. You can still trigger recording with: kill -USR1 \$(pidof whisper-typer)"
     fi
 fi
 
@@ -212,6 +197,3 @@ echo "    whisper-typer --daemon"
 echo ""
 info "Default hotkey: Ctrl+."
 echo ""
-if ! groups | grep -qw input; then
-    warn "Remember to log out and back in if you added yourself to the 'input' group."
-fi

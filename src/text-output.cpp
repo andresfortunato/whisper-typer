@@ -48,11 +48,28 @@ void TextOutput::set_backend(DisplayBackend backend) {
     m_backend = backend;
 }
 
+void TextOutput::set_allow_wtype(bool allow) {
+    m_allow_wtype = allow;
+}
+
+bool TextOutput::init_libei() {
+    return m_libei.init();
+}
+
 bool TextOutput::type(const std::string & text) {
     if (text.empty()) return true;
 
     if (m_backend == DisplayBackend::WAYLAND) {
-        return type_wtype(text);
+        // Primary: libei (compositor-mediated, secure)
+        if (m_libei.is_initialized()) {
+            if (type_libei(text)) return true;
+        }
+        // Fallback: wtype (opt-in only)
+        if (m_allow_wtype) {
+            return type_wtype(text);
+        }
+        fprintf(stderr, "text-output: no Wayland typing backend available\n");
+        return false;
     }
 
     // X11 path
@@ -61,6 +78,10 @@ bool TextOutput::type(const std::string & text) {
     } else {
         return type_xdotool(text);
     }
+}
+
+bool TextOutput::type_libei(const std::string & text) {
+    return m_libei.type_text(text, m_type_delay_ms);
 }
 
 // Run a command with explicit argv (no shell involved).

@@ -10,14 +10,41 @@ set(WHISPER_SDL2 ON CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static libraries" FORCE)
+set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan GPU backend" FORCE)
 
 add_subdirectory(whisper.cpp)
 
 find_package(SDL2 REQUIRED)
 find_package(Threads REQUIRED)
 
-# Optional system tray support via ayatana-appindicator3
-option(ENABLE_TRAY "Build with system tray support" ON)
+# Optional GUI window via Dear ImGui (SDL2 + OpenGL3)
+option(ENABLE_GUI "Build with GUI window support" ON)
+if(ENABLE_GUI)
+    find_package(OpenGL REQUIRED)
+
+    add_library(imgui STATIC
+        third_party/imgui/imgui.cpp
+        third_party/imgui/imgui_draw.cpp
+        third_party/imgui/imgui_tables.cpp
+        third_party/imgui/imgui_widgets.cpp
+        third_party/imgui/imgui_demo.cpp
+        third_party/imgui/backends/imgui_impl_sdl2.cpp
+        third_party/imgui/backends/imgui_impl_opengl3.cpp
+    )
+    target_include_directories(imgui PUBLIC
+        third_party/imgui
+        third_party/imgui/backends
+        ${SDL2_INCLUDE_DIRS}
+    )
+    target_link_libraries(imgui PUBLIC ${SDL2_LIBRARIES} OpenGL::GL)
+    target_compile_features(imgui PRIVATE cxx_std_11)
+    set(HAS_GUI ON)
+else()
+    set(HAS_GUI OFF)
+endif()
+
+# Optional system tray icon via ayatana-appindicator3
+option(ENABLE_TRAY "Build with system tray icon" ON)
 if(ENABLE_TRAY)
     find_package(PkgConfig)
     if(PkgConfig_FOUND)
@@ -31,6 +58,26 @@ if(ENABLE_TRAY)
     endif()
 else()
     set(HAS_TRAY OFF)
+endif()
+
+# Optional libei input emulation (Wayland, compositor-mediated)
+option(ENABLE_LIBEI "Build with libei input support" ON)
+if(ENABLE_LIBEI)
+    if(NOT PkgConfig_FOUND)
+        find_package(PkgConfig)
+    endif()
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LIBEI libei-1.0)
+        pkg_check_modules(OEFFIS liboeffis-1.0)
+    endif()
+    if(LIBEI_FOUND AND OEFFIS_FOUND)
+        set(HAS_LIBEI ON)
+    else()
+        set(HAS_LIBEI OFF)
+        message(STATUS "libei disabled: libei-dev or liboeffis-dev not found")
+    endif()
+else()
+    set(HAS_LIBEI OFF)
 endif()
 
 set(EXAMPLES_DIR ${CMAKE_SOURCE_DIR}/whisper.cpp/examples)
@@ -87,11 +134,24 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(whisper-typer PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+if(HAS_GUI)
+    target_sources(whisper-typer PRIVATE src/window.cpp src/window_logic.cpp)
+    target_link_libraries(whisper-typer PRIVATE imgui)
+    target_compile_definitions(whisper-typer PRIVATE HAS_GUI=1)
+endif()
+
 if(HAS_TRAY)
     target_sources(whisper-typer PRIVATE src/tray.cpp)
     target_include_directories(whisper-typer PRIVATE ${APPINDICATOR_INCLUDE_DIRS})
     target_link_libraries(whisper-typer PRIVATE ${APPINDICATOR_LIBRARIES})
     target_compile_definitions(whisper-typer PRIVATE HAS_TRAY=1)
+endif()
+
+if(HAS_LIBEI)
+    target_sources(whisper-typer PRIVATE src/libei-kbd.cpp)
+    target_include_directories(whisper-typer PRIVATE ${LIBEI_INCLUDE_DIRS} ${OEFFIS_INCLUDE_DIRS})
+    target_link_libraries(whisper-typer PRIVATE ${LIBEI_LIBRARIES} ${OEFFIS_LIBRARIES})
+    target_compile_definitions(whisper-typer PRIVATE HAS_LIBEI=1)
 endif()
 
 include(GNUInstallDirs)
@@ -100,8 +160,9 @@ install(FILES contrib/whisper-typer.service
     DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/user)
 install(FILES contrib/whisper-typer.desktop
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
-install(FILES contrib/whisper-typer.desktop
-    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/xdg/autostart)
+install(FILES contrib/whisper-typer-autostart.desktop
+    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/xdg/autostart
+    RENAME whisper-typer.desktop)
 
 # Tests
 option(BUILD_TESTS "Build unit tests" OFF)
@@ -124,10 +185,23 @@ if(BUILD_TESTS)
     endif()
     add_test(NAME hotkey COMMAND test-hotkey)
 
-    add_executable(test-terminal tests/test_terminal.cpp)
-    target_include_directories(test-terminal PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    set(TEST_TERMINAL_SOURCES tests/test_terminal.cpp)
+    set(TEST_TERMINAL_LIBS ${CMAKE_THREAD_LIBS_INIT})
+    set(TEST_TERMINAL_INCDIRS ${CMAKE_SOURCE_DIR}/src)
+    set(TEST_TERMINAL_DEFS "")
+    if(HAS_LIBEI)
+        list(APPEND TEST_TERMINAL_SOURCES src/libei-kbd.cpp)
+        list(APPEND TEST_TERMINAL_LIBS ${LIBEI_LIBRARIES} ${OEFFIS_LIBRARIES})
+        list(APPEND TEST_TERMINAL_INCDIRS ${LIBEI_INCLUDE_DIRS} ${OEFFIS_INCLUDE_DIRS})
+        list(APPEND TEST_TERMINAL_DEFS HAS_LIBEI=1)
+    endif()
+    add_executable(test-terminal ${TEST_TERMINAL_SOURCES})
+    target_include_directories(test-terminal PRIVATE ${TEST_TERMINAL_INCDIRS})
     target_compile_features(test-terminal PRIVATE cxx_std_17)
-    target_link_libraries(test-terminal PRIVATE ${CMAKE_THREAD_LIBS_INIT})
+    target_link_libraries(test-terminal PRIVATE ${TEST_TERMINAL_LIBS})
+    if(TEST_TERMINAL_DEFS)
+        target_compile_definitions(test-terminal PRIVATE ${TEST_TERMINAL_DEFS})
+    endif()
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(test-terminal PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
     endif()
@@ -154,4 +228,20 @@ if(BUILD_TESTS)
         target_compile_options(test-zombie PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME zombie COMMAND test-zombie)
+
+    add_executable(test-window tests/test_window.cpp src/window_logic.cpp)
+    target_include_directories(test-window PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_features(test-window PRIVATE cxx_std_17)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test-window PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME window COMMAND test-window)
+
+    add_executable(test-uinput-keymap tests/test_uinput_keymap.cpp)
+    target_include_directories(test-uinput-keymap PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_features(test-uinput-keymap PRIVATE cxx_std_17)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test-uinput-keymap PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME uinput-keymap COMMAND test-uinput-keymap)
 endif()

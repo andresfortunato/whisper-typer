@@ -9,6 +9,9 @@
 #include "whisper.h"
 #include "hotkey.h"
 #include "text-output.h"
+#ifdef HAS_GUI
+#include "window.h"
+#endif
 #ifdef HAS_TRAY
 #include "tray.h"
 #endif
@@ -39,7 +42,7 @@ static_assert(std::atomic<bool>::is_always_lock_free,
 // command-line parameters
 struct typer_params {
     // whisper
-    int32_t     n_threads      = std::min(4, (int32_t) std::thread::hardware_concurrency());
+    int32_t     n_threads      = std::min(5, (int32_t) std::thread::hardware_concurrency());
     int32_t     capture_id     = -1;
     int32_t     audio_ctx      = 0;
     bool        translate      = false;
@@ -68,13 +71,16 @@ struct typer_params {
     std::string history_file;
     int32_t     max_history_mb    = 10;
 
-    // tray
-    bool        no_tray        = false;
+    // gui
+    bool        no_gui         = false;
 
     // daemon
     bool        daemonize      = false;
     bool        stop_daemon    = false;
     bool        print_energy   = false;
+
+    // wayland
+    bool        allow_wtype    = false;
     bool        threads_explicit = false;
 };
 
@@ -163,11 +169,12 @@ static bool load_config_file(typer_params & params) {
         else if (key == "vad-model")      { params.vad_model_path = val; }
         else if (key == "no-clipboard")   { params.use_clipboard = !(val == "true" || val == "1"); }
         else if (key == "type-delay-ms")  { parse_int(val.c_str(), params.type_delay_ms); }
-        else if (key == "no-tray")        { params.no_tray = (val == "true" || val == "1"); }
+        else if (key == "no-gui")        { params.no_gui = (val == "true" || val == "1"); }
         else if (key == "no-history")     { params.no_history = (val == "true" || val == "1"); }
         else if (key == "history-file")   { params.history_file = val; }
         else if (key == "max-history-mb") { parse_int(val.c_str(), params.max_history_mb); }
         else if (key == "daemon")         { params.daemonize = (val == "true" || val == "1"); }
+        else if (key == "allow-wtype")   { params.allow_wtype = (val == "true" || val == "1"); }
         else {
             fprintf(stderr, "config:%d: unknown key '%s'\n", line_num, key.c_str());
         }
@@ -199,12 +206,13 @@ static void typer_print_usage(int /*argc*/, char ** argv, const typer_params & p
     fprintf(stderr, "            --vad-model F        Silero VAD model path\n");
     fprintf(stderr, "            --no-clipboard       use keystroke simulation\n");
     fprintf(stderr, "            --type-delay-ms N[%-6d] keystroke delay (ms)\n",                   params.type_delay_ms);
-    fprintf(stderr, "            --no-tray            disable system tray icon\n");
+    fprintf(stderr, "            --no-gui             disable GUI window\n");
     fprintf(stderr, "            --no-history         disable transcript history\n");
     fprintf(stderr, "            --history-file F     custom history file path\n");
     fprintf(stderr, "            --max-history-mb N   max history file size (MB, default 10)\n");
-    fprintf(stderr, "            --daemon             run as background daemon\n");
+    fprintf(stderr, "            --daemon             start with window hidden (for autostart)\n");
     fprintf(stderr, "            --stop               stop running daemon\n");
+    fprintf(stderr, "            --allow-wtype        enable wtype fallback (Wayland, see security note)\n");
     fprintf(stderr, "  -pe,      --print-energy       print audio energy levels\n");
     fprintf(stderr, "\n");
 }
@@ -244,12 +252,13 @@ static bool typer_params_parse(int argc, char ** argv, typer_params & params) {
         else if (                 arg == "--vad-model")      { auto v = next_arg(); if (!v) return false; params.vad_model_path     = v; }
         else if (                 arg == "--no-clipboard")   { params.use_clipboard      = false; }
         else if (                 arg == "--type-delay-ms")  { auto v = next_arg(); if (!v || !parse_int(v, params.type_delay_ms)) return false; }
-        else if (                 arg == "--no-tray")          { params.no_tray               = true; }
+        else if (                 arg == "--no-gui")          { params.no_gui               = true; }
         else if (                 arg == "--no-history")      { params.no_history            = true; }
         else if (                 arg == "--history-file")   { auto v = next_arg(); if (!v) return false; params.history_file = v; }
         else if (                 arg == "--max-history-mb") { auto v = next_arg(); if (!v || !parse_int(v, params.max_history_mb)) return false; }
         else if (                 arg == "--daemon")         { params.daemonize           = true; }
         else if (                 arg == "--stop")           { params.stop_daemon         = true; }
+        else if (                 arg == "--allow-wtype")   { params.allow_wtype         = true; }
         else if (arg == "-pe"  || arg == "--print-energy")   { params.print_energy        = true; }
         else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
@@ -262,6 +271,7 @@ static bool typer_params_parse(int argc, char ** argv, typer_params & params) {
 
 static std::atomic<bool> g_running(true);
 static std::atomic<bool> g_sigusr1(false);
+static std::atomic<bool> g_sigusr2(false);  // show window
 
 static bool whisper_abort_cb(void * /*user_data*/) {
     return !g_running;
@@ -320,6 +330,9 @@ static void signal_handler(int /*sig*/) {
 #ifdef __linux__
 static void sigusr1_handler(int /*sig*/) {
     g_sigusr1 = true;
+}
+static void sigusr2_handler(int /*sig*/) {
+    g_sigusr2 = true;
 }
 #endif
 
@@ -410,10 +423,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // Cap threads to 2 in daemon mode unless explicitly set
-    if (params.daemonize && !params.threads_explicit && params.n_threads > 2) {
-        params.n_threads = 2;
-    }
+    // (daemon mode no longer caps threads — it runs with full GUI, just hidden)
 
     // Resolve history file path
     std::string history_path;
@@ -519,10 +529,7 @@ int main(int argc, char ** argv) {
     }
 
     if (display == DisplayBackend::WAYLAND) {
-        if (!check_dep("wtype")) {
-            fprintf(stderr, "error: wtype not found. Install with: sudo apt install wtype\n");
-            return 1;
-        }
+        // libei is the primary backend. wtype is an opt-in fallback (--allow-wtype).
     } else {
         if (!check_dep("xdotool")) {
             fprintf(stderr, "error: xdotool not found. Install with: sudo apt install xdotool\n");
@@ -547,8 +554,19 @@ int main(int argc, char ** argv) {
     int lock_fd = open(lock_path.c_str(), O_CREAT | O_RDWR, 0600);
     if (lock_fd >= 0) {
         if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0) {
-            fprintf(stderr, "error: another whisper-typer instance is already running\n");
+            // Another instance is running — signal it to show its window
+            char pid_buf[32] = {};
+            lseek(lock_fd, 0, SEEK_SET);
+            ssize_t n = read(lock_fd, pid_buf, sizeof(pid_buf) - 1);
             close(lock_fd);
+            if (n > 0) {
+                pid_t existing_pid = atoi(pid_buf);
+                if (existing_pid > 0 && kill(existing_pid, SIGUSR2) == 0) {
+                    fprintf(stderr, "whisper-typer: signaled existing instance (PID %d) to show window\n", existing_pid);
+                    return 0;
+                }
+            }
+            fprintf(stderr, "error: another instance is running but could not signal it\n");
             return 1;
         }
         // Write PID to lock file for --stop support
@@ -562,41 +580,13 @@ int main(int argc, char ** argv) {
     }
 #endif
 
-    // Daemonize before any SDL/X11 init
-#ifdef __linux__
-    if (params.daemonize) {
-        pid_t pid = fork();
-        if (pid < 0) {
-            perror("fork");
-            return 1;
-        }
-        if (pid > 0) {
-            // Parent: print child PID and exit
-            printf("%d\n", pid);
-            return 0;
-        }
-        // Child: new session, detach from terminal
-        setsid();
-        if (nice(10) == -1 && errno != 0) {
-            perror("nice");
-        }
-        if (chdir("/") != 0) {
-            perror("chdir");
-        }
-        if (!freopen("/dev/null", "r", stdin)) {
-            perror("freopen stdin");
-        }
-        if (!freopen("/dev/null", "w", stdout)) {
-            perror("freopen stdout");
-        }
-        // Keep stderr for logging
-    }
-#endif
+    // --daemon: start with window hidden (for autostart). No fork — XDG autostart doesn't need it.
 
     signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
 #ifdef __linux__
     signal(SIGUSR1, sigusr1_handler);
+    signal(SIGUSR2, sigusr2_handler);
     signal(SIGTSTP, SIG_IGN);  // Prevent job-control stop (Ctrl+Z) — a stopped process can't respond to SIGTERM
 #endif
 
@@ -660,18 +650,61 @@ int main(int argc, char ** argv) {
     output.set_use_clipboard(params.use_clipboard);
     output.set_type_delay_ms(params.type_delay_ms);
 
-    // Init system tray icon
-#ifdef HAS_TRAY
-    TrayIcon tray;
-    bool tray_ok = false;
+    // Initialize keyboard backend for Wayland
+    if (display == DisplayBackend::WAYLAND) {
+        if (output.init_libei()) {
+            fprintf(stderr, "whisper-typer: libei keyboard initialized\n");
+        } else if (params.allow_wtype) {
+            fprintf(stderr, "whisper-typer: libei unavailable, wtype fallback enabled\n");
+            fprintf(stderr, "  WARNING: wtype uses the virtual-keyboard Wayland protocol.\n");
+            fprintf(stderr, "  On wlroots compositors, any Wayland client can inject keystrokes.\n");
+        } else {
+            fprintf(stderr, "whisper-typer: libei unavailable and wtype fallback disabled\n");
+            fprintf(stderr, "  Typing will not work on Wayland without a backend.\n");
+            fprintf(stderr, "  Recommended: install libei-dev + liboeffis-dev and rebuild.\n");
+            fprintf(stderr, "  Alternative: start with --allow-wtype (or allow-wtype=true in config)\n");
+            fprintf(stderr, "    Note: wtype allows any Wayland client to inject keystrokes on wlroots compositors.\n");
+        }
+        output.set_allow_wtype(params.allow_wtype);
+    }
+
+    // Init GUI window (always created; hidden in daemon mode, shown otherwise)
+#ifdef HAS_GUI
+    AppWindow window;
+    bool window_ok = false;
     std::string last_transcript;
-    if (!params.no_tray) {
-        TrayCallbacks cb;
+    if (!params.no_gui) {
+        WindowCallbacks cb;
         cb.on_toggle = [&]() { g_sigusr1 = true; };
         cb.on_quit   = [&]() { g_running = false; };
         cb.get_last_transcript = [&]() { return last_transcript; };
         cb.get_history_path    = [&]() { return history_path; };
-        tray_ok = tray.init(cb);
+        window_ok = window.init(cb);
+        if (window_ok) {
+            window.set_hotkey(params.hotkey);
+            if (params.daemonize) {
+                window.hide();  // daemon mode: start hidden, show via tray or SIGUSR2
+            }
+        }
+    }
+#endif
+
+    // Init system tray icon
+#ifdef HAS_TRAY
+    TrayIcon tray;
+    bool tray_ok = false;
+    if (!params.no_gui) {
+        TrayCallbacks tray_cb;
+#ifdef HAS_GUI
+        tray_cb.on_show_window = [&]() {
+            if (window_ok) {
+                if (window.is_visible()) window.hide();
+                else window.show();
+            }
+        };
+#endif
+        tray_cb.on_quit = [&]() { g_running = false; };
+        tray_ok = tray.init(tray_cb);
     }
 #endif
 
@@ -715,14 +748,28 @@ int main(int argc, char ** argv) {
     }
 
     while (g_running) {
-        // Handle SDL events (for Ctrl+C via SDL)
-        if (!sdl_poll_events()) {
-            break;
+        // Process GUI events before sdl_poll_events() — the upstream function
+        // drains all SDL events but only acts on SDL_QUIT. Our window.poll()
+        // must run first so ImGui receives mouse/keyboard/window events.
+        // SDL_QUIT is pushed back for sdl_poll_events() to catch.
+#ifdef HAS_GUI
+        if (window_ok) {
+            // SIGUSR2: show window (sent by second instance or desktop launcher)
+            if (g_sigusr2.exchange(false)) {
+                window.show();
+            }
+            window.poll();
         }
+#endif
 
 #ifdef HAS_TRAY
         if (tray_ok) tray.poll();
 #endif
+
+        // Handle SDL events (for Ctrl+C via SDL)
+        if (!sdl_poll_events()) {
+            break;
+        }
 
         switch (state) {
             case State::IDLE: {
@@ -742,6 +789,9 @@ int main(int argc, char ** argv) {
                     hotkey.poll_released();
 
                     state = State::RECORDING;
+#ifdef HAS_GUI
+                    if (window_ok) window.set_state(AppState::RECORDING);
+#endif
 #ifdef HAS_TRAY
                     if (tray_ok) tray.set_state(TrayState::RECORDING);
 #endif
@@ -837,6 +887,9 @@ int main(int argc, char ** argv) {
                 if (pcmf32.empty()) {
                     fprintf(stderr, "[no audio captured]\n");
                     state = State::IDLE;
+#ifdef HAS_GUI
+                    if (window_ok) window.set_state(AppState::IDLE);
+#endif
 #ifdef HAS_TRAY
                     if (tray_ok) tray.set_state(TrayState::IDLE);
 #endif
@@ -848,6 +901,9 @@ int main(int argc, char ** argv) {
                 if (!speech_detected) {
                     fprintf(stderr, "[no speech detected, skipping]\n");
                     state = State::IDLE;
+#ifdef HAS_GUI
+                    if (window_ok) window.set_state(AppState::IDLE);
+#endif
 #ifdef HAS_TRAY
                     if (tray_ok) tray.set_state(TrayState::IDLE);
 #endif
@@ -855,6 +911,9 @@ int main(int argc, char ** argv) {
                     break;
                 }
 
+#ifdef HAS_GUI
+                if (window_ok) window.set_state(AppState::TRANSCRIBING);
+#endif
 #ifdef HAS_TRAY
                 if (tray_ok) tray.set_state(TrayState::TRANSCRIBING);
 #endif
@@ -873,10 +932,10 @@ int main(int argc, char ** argv) {
                         int dur = (int)(pcmf32.size() * 1000.0f / WHISPER_SAMPLE_RATE);
                         history_append(history_path, text, dur, params.max_history_mb);
                     }
-#ifdef HAS_TRAY
-                    if (tray_ok) {
+#ifdef HAS_GUI
+                    if (window_ok) {
                         last_transcript = text;
-                        tray.set_last_transcript(text);
+                        window.set_last_transcript(text);
                     }
 #endif
                 } else {
@@ -884,6 +943,9 @@ int main(int argc, char ** argv) {
                 }
 
                 state = State::IDLE;
+#ifdef HAS_GUI
+                if (window_ok) window.set_state(AppState::IDLE);
+#endif
 #ifdef HAS_TRAY
                 if (tray_ok) tray.set_state(TrayState::IDLE);
 #endif
@@ -896,6 +958,9 @@ int main(int argc, char ** argv) {
     // Cleanup
 #ifdef HAS_TRAY
     if (tray_ok) tray.shutdown();
+#endif
+#ifdef HAS_GUI
+    if (window_ok) window.shutdown();
 #endif
     hotkey.stop();
     audio.pause();
