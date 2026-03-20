@@ -1,0 +1,1 @@
+whisper-typer — Voice-to-text typing tool for Linux. Records speech via global hotkey, transcribes with whisper.cpp (Vulkan GPU), types result into focused window. Has ImGui window UI, system tray, autostart, transcript history. All major plans (imgui-window, desktop-integration, libei-backend) completed and archived.
