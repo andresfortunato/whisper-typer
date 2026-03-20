@@ -10,7 +10,7 @@ set(WHISPER_SDL2 ON CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static libraries" FORCE)
-set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan GPU backend" FORCE)
+option(GGML_VULKAN "Enable Vulkan GPU backend" OFF)
 
 add_subdirectory(whisper.cpp)
 
